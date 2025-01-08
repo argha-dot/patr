@@ -1,3 +1,5 @@
+use std::{thread, time};
+
 use ev::SubmitEvent;
 use leptos_use::{signal_debounced_with_options, utils::DebounceOptions};
 use models::api::auth::*;
@@ -44,6 +46,46 @@ pub async fn sign_up(
 	Ok(())
 }
 
+#[server(IsEmailValidFn, endpoint = "auth/is-email-valid")]
+pub async fn is_email_valid(
+	email: String,
+) -> Result<IsEmailValidResponse, ServerFnError<ErrorType>> {
+	thread::sleep(time::Duration::from_secs(2));
+
+	make_api_call::<IsEmailValidRequest>(
+		ApiRequest::builder()
+			.path(IsEmailValidPath)
+			.query(IsEmailValidQuery { email })
+			.headers(IsEmailValidRequestHeaders {
+				user_agent: UserAgent::from_static("hyper/0.12.2"),
+			})
+			.body(IsEmailValidRequest)
+			.build(),
+	)
+	.await
+	.map(|res| res.body)
+	.map_err(ServerFnError::WrappedServerError)
+}
+
+#[server(IsUsernameValidFn, endpoint = "auth/is-username-valid")]
+pub async fn is_username_valid(
+	username: String,
+) -> Result<IsUsernameValidResponse, ServerFnError<ErrorType>> {
+	make_api_call::<IsUsernameValidRequest>(
+		ApiRequest::builder()
+			.path(IsUsernameValidPath)
+			.query(IsUsernameValidQuery { username })
+			.headers(IsUsernameValidRequestHeaders {
+				user_agent: UserAgent::from_static("hyper/0.12.2"),
+			})
+			.body(IsUsernameValidRequest)
+			.build(),
+	)
+	.await
+	.map(|res| res.body)
+	.map_err(ServerFnError::WrappedServerError)
+}
+
 #[component]
 pub fn SignUpForm(
 	/// The query params for the page
@@ -60,18 +102,36 @@ pub fn SignUpForm(
 	let app_type = expect_context::<AppType>();
 
 	let first_name = create_rw_signal(first_name.unwrap_or_else(|| "".to_owned()));
-	let name_error = Signal::derive(move || {
-		first_name
-			.get()
-			.is_empty()
-			.then_some("Name cannot be empty".to_owned())
-			.unwrap_or_default()
-	});
+	let name_error = create_rw_signal("".to_owned());
 
 	let last_name = create_rw_signal(last_name.unwrap_or_else(|| "".to_owned()));
 
 	let email = create_rw_signal(email.unwrap_or_else(|| "".to_owned()));
 	let email_error = create_rw_signal("".to_owned());
+	let email_checking_loading = create_rw_signal(false);
+	let email_checking = create_resource(
+		move || {
+			signal_debounced_with_options(
+				email,
+				constants::DEFAULT_DEBOUNCE_TIME,
+				DebounceOptions::default().max_wait(Some(constants::MAX_DEBOUNCE_TIME)),
+			)
+			.get()
+		},
+		move |email| async move {
+			if email.is_empty() {
+				return Err(ServerFnError::WrappedServerError(ErrorType::server_error(
+					"empty email",
+				)));
+			}
+
+			email_checking_loading.set(true);
+			let res = is_email_valid(email.clone()).await;
+			email_checking_loading.set(false);
+
+			res
+		},
+	);
 	// let email_checking = create_resource(
 	// 	move || {
 	// 		signal_debounced_with_options(
@@ -175,6 +235,7 @@ pub fn SignUpForm(
 
 		if first_name.get().is_empty() || last_name.get().is_empty() {
 			loading.set(false);
+			name_error.set("Name cannot be empty".to_string());
 			return;
 		}
 
@@ -328,6 +389,41 @@ pub fn SignUpForm(
 					value={email}
 					on_input={Box::new(move |ev| { email.set(event_target_value(&ev)) })}
 				/>
+
+				{
+					move || email_checking_loading.get().then(|| view! {
+						<Alert r#type={AlertType::Warning} class="mt-xs">
+							"Checking email..."
+						</Alert>
+					}.into_view())
+				}
+				<Suspense>
+					{
+						move || match email_checking.get() {
+							None => view! {
+								<Alert r#type={AlertType::Warning} class="mt-xs">
+									"Checking email..."
+								</Alert>
+							}.into_view(),
+							Some(Ok(IsEmailValidResponse { available })) => {
+								if available {
+									view! {
+										<Alert r#type={AlertType::Success} class="mt-xs">
+											"Email is available"
+										</Alert>
+									}.into_view()
+								} else {
+									view! {
+										<Alert r#type={AlertType::Error} class="mt-xs">
+											"Email is not available"
+										</Alert>
+									}.into_view()
+								}
+							},
+							Some(Err(err)) => view! {}.into_view()
+						}
+					}
+				</Suspense>
 
 				<Show when={move || !email_error.get().is_empty()}>
 					<Alert r#type={AlertType::Error} class="mt-xs">
